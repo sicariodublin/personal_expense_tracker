@@ -41,8 +41,18 @@ const seed: Transaction[] = [
   { id: 10, date: "2026-07-12", merchant: "The Brick Room", category: "Dining", amount: 46.8, type: "expense" },
 ];
 
-const budgets: Record<string, number> = { Groceries: 600, Transport: 400, Utilities: 350, Entertainment: 120 };
+const defaultBudgets: Record<string, number> = { Groceries: 600, Transport: 400, Utilities: 350, Entertainment: 120 };
 const money = new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" });
+
+function loadSavedBudgets() {
+  if (typeof window === "undefined") return defaultBudgets;
+  try {
+    const saved = localStorage.getItem("ledgerly-budgets");
+    return saved ? JSON.parse(saved) as Record<string, number> : defaultBudgets;
+  } catch {
+    return defaultBudgets;
+  }
+}
 const emptyDraft = (): Draft => ({ date: new Date().toISOString().slice(0, 10), merchant: "", category: "Groceries", amount: 0, type: "expense", note: "" });
 
 function parseCsv(text: string): Transaction[] {
@@ -86,6 +96,7 @@ export default function Home() {
   const [modal, setModal] = useState<"add" | "import" | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft());
+  const [budgets, setBudgets] = useState<Record<string, number>>(() => loadSavedBudgets());
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
   const [notice, setNotice] = useState("");
@@ -99,12 +110,13 @@ export default function Home() {
       const data = await r.json() as { transactions: Transaction[] };
       setApiReady(true);
       setTransactions(data.transactions);
-    }).catch(() => {
+    }).catch((error) => {
       setApiReady(false);
       setTransactions([]);
-      setNotice("Could not connect to the local transaction API");
+      setNotice(friendlyError(error, "Could not connect to the local transaction API"));
     });
   }, []);
+
 
   const expense = transactions.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
   const income = transactions.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
@@ -114,6 +126,7 @@ export default function Home() {
     value: transactions.filter(t => t.type === "expense" && t.category === name).reduce((s, t) => s + t.amount, 0),
   })).filter(x => x.value > 0).sort((a, b) => b.value - a.value), [transactions]);
   const visible = transactions.filter(t => (category === "All" || t.category === category) && `${t.merchant} ${t.note ?? ""}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.date.localeCompare(a.date));
+  const budgetCategoryNames = categories.filter(name => name !== "Income");
   const chartValues = useMemo(() => {
     const expenses = transactions.filter(t => t.type === "expense");
     if (chartMode === "weekly") {
@@ -139,6 +152,43 @@ export default function Home() {
   async function readApiError(response: Response) {
     const data = await response.json().catch(() => null) as { error?: string } | null;
     return data?.error ?? "Request failed";
+  }
+
+  function friendlyError(error: unknown, fallback: string) {
+    if (error instanceof TypeError && error.message === "Failed to fetch") {
+      return "Could not reach the local app server. Restart it with npm run dev.";
+    }
+    return error instanceof Error ? error.message : fallback;
+  }
+
+  function persistBudgets(nextBudgets: Record<string, number>) {
+    setBudgets(nextBudgets);
+    localStorage.setItem("ledgerly-budgets", JSON.stringify(nextBudgets));
+  }
+
+  function editBudget(name: string, current: number) {
+    const raw = window.prompt(`Monthly budget for ${name}. Leave blank or enter 0 to remove it.`, current ? String(current) : "");
+    if (raw === null) return;
+    const trimmed = raw.trim();
+    const amount = Number(trimmed.replace(",", "."));
+
+    if (!trimmed || amount === 0) {
+      const next = { ...budgets };
+      delete next[name];
+      persistBudgets(next);
+      setNotice(`${name} budget removed`);
+      setTimeout(() => setNotice(""), 2500);
+      return;
+    }
+
+    if (!Number.isFinite(amount) || amount < 0) {
+      setNotice("Enter a valid budget amount");
+      return;
+    }
+
+    persistBudgets({ ...budgets, [name]: Math.round(amount * 100) / 100 });
+    setNotice(`${name} budget saved`);
+    setTimeout(() => setNotice(""), 2500);
   }
 
   async function saveTransaction(event: FormEvent) {
@@ -173,7 +223,7 @@ export default function Home() {
       setDraft(emptyDraft());
       setTimeout(() => setNotice(""), 2500);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not save transaction");
+      setNotice(friendlyError(error, "Could not save transaction"));
     }
   }
   function startEdit(tx: Transaction) {
@@ -192,7 +242,7 @@ export default function Home() {
       setNotice("Transaction deleted");
       setTimeout(() => setNotice(""), 2500);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not delete transaction");
+      setNotice(friendlyError(error, "Could not delete transaction"));
     }
   }
   async function importFile(event: ChangeEvent<HTMLInputElement>) {
@@ -214,7 +264,7 @@ export default function Home() {
       setNotice(`${data.transactions.length} transactions imported`);
       setTimeout(() => setNotice(""), 3000);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not read that CSV file");
+      setNotice(friendlyError(error, "Could not read that CSV file"));
     } finally {
       event.target.value = "";
     }
@@ -232,7 +282,7 @@ export default function Home() {
       setNotice("Demo data loaded");
       setTimeout(() => setNotice(""), 2500);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not load demo data");
+      setNotice(friendlyError(error, "Could not load demo data"));
     }
   }
   return (
@@ -284,7 +334,7 @@ export default function Home() {
 
             <div className="right-stack">
               <article className="card budget-card"><div className="card-head"><div><h2>Budget progress</h2><p>July category limits</p></div><button className="text-button" onClick={() => setActive("Budgets")}>View all</button></div>
-                {Object.entries(budgets).map(([name, limit]) => { const spent = byCategory.find(x => x.name === name)?.value ?? 0; const pct = Math.min(Math.round(spent / limit * 100), 100); return <div className="budget-row" key={name}><div><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><span>{name}</span><small>{money.format(spent)} / {money.format(limit)}</small><b>{pct}%</b></div><div className="progress"><i style={{ width: `${pct}%` }} /></div></div> })}
+                {Object.entries(budgets).map(([name, limit]) => { const spent = byCategory.find(x => x.name === name)?.value ?? 0; const pct = Math.min(Math.round(spent / limit * 100), 100); return <div className="budget-row" key={name}><div><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><span>{name}</span><small>{money.format(spent)} / {money.format(limit)}</small><b>{pct}%</b><button type="button" className="row-action" onClick={() => editBudget(name, limit)}>Edit</button></div><div className="progress"><i style={{ width: `${pct}%` }} /></div></div> })}
               </article>
               <article className="card insight-card"><span className="insight-icon">↗</span><div><h3>{balance >= 0 ? "You're on track" : "Review your spending"}</h3><p>{balance >= 0 ? `You kept ${money.format(balance)} after expenses this month.` : `Spending is ${money.format(Math.abs(balance))} above income.`}</p></div></article>
             </div>
@@ -297,7 +347,7 @@ export default function Home() {
           {!visible.length && <div className="empty"><strong>No transactions found</strong><span>Try another search or add a new transaction.</span><button className="secondary" onClick={loadDemoData}>Load demo data</button></div>}
         </section>}
 
-        {active === "Budgets" && <section className="standalone-grid">{Object.entries(budgets).map(([name, limit]) => { const spent = byCategory.find(x => x.name === name)?.value ?? 0; return <article className="card budget-tile" key={name}><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><h2>{name}</h2><strong>{money.format(spent)}</strong><p>of {money.format(limit)} monthly limit</p><div className="progress"><i style={{ width: `${Math.min(spent / limit * 100, 100)}%` }} /></div></article> })}</section>}
+        {active === "Budgets" && <section className="standalone-grid">{budgetCategoryNames.map((name) => { const limit = budgets[name] ?? 0; const spent = byCategory.find(x => x.name === name)?.value ?? 0; const pct = limit ? Math.min(spent / limit * 100, 100) : 0; return <article className="card budget-tile" key={name}><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><h2>{name}</h2><strong>{money.format(spent)}</strong><p>{limit ? `of ${money.format(limit)} monthly limit` : "No monthly limit set"}</p><button type="button" className="secondary budget-edit" onClick={() => editBudget(name, limit)}>{limit ? "Edit budget" : "Set budget"}</button><div className="progress"><i style={{ width: `${pct}%` }} /></div></article> })}</section>}
         {active === "Insights" && <section className="standalone-grid insights">{byCategory.map(item => <article className="card budget-tile" key={item.name}><span className="cat-icon" style={{ "--cat": categoryMeta[item.name]?.color } as React.CSSProperties}>{categoryMeta[item.name]?.icon}</span><h2>{item.name}</h2><strong>{money.format(item.value)}</strong><p>{expense ? (item.value / expense * 100).toFixed(1) : 0}% of total spending</p></article>)}</section>}
       </section>
 

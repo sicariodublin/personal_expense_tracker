@@ -1,6 +1,6 @@
-﻿import { desc, eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { getDb } from ".";
 import { transactions } from "./schema";
 
@@ -15,7 +15,7 @@ export type TransactionInput = {
   note?: unknown;
 };
 
-const localDataPath = process.env.LEDGERLY_LOCAL_DATA_PATH ?? "data/transactions.json";
+const localDataPath = join(/*turbopackIgnore: true*/ process.cwd(), "data", "transactions.json");
 
 type NormalizedTransaction = Omit<Transaction, "id">;
 
