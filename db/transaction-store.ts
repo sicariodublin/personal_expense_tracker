@@ -20,7 +20,7 @@ const localDataPath = process.env.LEDGERLY_LOCAL_DATA_PATH ?? "data/transactions
 type NormalizedTransaction = Omit<Transaction, "id">;
 
 function shouldUseLocalStore() {
-  return process.env.LEDGERLY_STORE === "local" || process.env.NODE_ENV !== "production";
+  return process.env.LEDGERLY_STORE !== "d1";
 }
 
 async function getOptionalDb() {
@@ -176,6 +176,7 @@ export async function importTransactions(inputs: TransactionInput[]) {
   await writeLocalTransactions([...created, ...rows]);
   return sortTransactions(created);
 }
+
 
 
 

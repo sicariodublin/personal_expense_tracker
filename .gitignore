@@ -44,3 +44,6 @@ next-env.d.ts
 # local Ledgerly data
 /data/
 *.tsbuildinfo
+
+# local browser test profile
+/.chrome-test-profile/
