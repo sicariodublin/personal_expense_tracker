@@ -1,11 +1,19 @@
-import { drizzle } from "drizzle-orm/d1";
+﻿import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./schema";
 
+type D1DatabaseBinding = Parameters<typeof drizzle>[0];
+type CloudflareWorkersModule = { env?: { DB?: D1DatabaseBinding } };
+
+const dynamicImport = new Function(
+  "specifier",
+  "return import(specifier)",
+) as (specifier: string) => Promise<CloudflareWorkersModule>;
+
 export async function getDb() {
-  const { env } = await import("cloudflare:workers");
-  if (!env.DB) {
+  const { env } = await dynamicImport("cloudflare:workers");
+  if (!env?.DB) {
     throw new Error(
-      "Cloudflare D1 binding `DB` is unavailable. Set the `d1` field in .openai/hosting.json to `DB` or let your control plane inject the real binding values before using the database."
+      "Cloudflare D1 binding `DB` is unavailable. Local development uses data/transactions.json through the transaction store."
     );
   }
 

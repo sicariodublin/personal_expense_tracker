@@ -65,7 +65,7 @@ function parseCsv(text: string): Transaction[] {
     const debit = debitIdx >= 0 ? Number((row[debitIdx] || "0").replace(/[€£,\s]/g, "")) : 0;
     const credit = creditIdx >= 0 ? Number((row[creditIdx] || "0").replace(/[€£,\s]/g, "")) : 0;
     const raw = amountIdx >= 0 ? Number((row[amountIdx] || "0").replace(/[€£,\s]/g, "")) : credit - debit;
-    const type = credit > 0 || raw > 0 && debitIdx < 0 ? "income" : "expense";
+    const type: Transaction["type"] = credit > 0 || raw > 0 && debitIdx < 0 ? "income" : "expense";
     const amount = Math.abs(raw || debit || credit);
     const rawDate = row[dateIdx];
     const parsed = new Date(rawDate.split("/").reverse().join("-"));
@@ -81,7 +81,7 @@ function parseCsv(text: string): Transaction[] {
 }
 
 export default function Home() {
-  const [transactions, setTransactions] = useState<Transaction[]>(seed);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [active, setActive] = useState("Dashboard");
   const [modal, setModal] = useState<"add" | "import" | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
@@ -89,7 +89,8 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
   const [notice, setNotice] = useState("");
-  const [apiReady, setApiReady] = useState(false);
+  const [, setApiReady] = useState(false);
+  const [chartMode, setChartMode] = useState<"monthly" | "weekly">("monthly");
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -97,9 +98,12 @@ export default function Home() {
       if (!r.ok) throw new Error();
       const data = await r.json() as { transactions: Transaction[] };
       setApiReady(true);
-      if (data.transactions.length) setTransactions(data.transactions);
-      else await Promise.all(seed.map(t => fetch("/api/transactions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(t) })));
-    }).catch(() => setTransactions(seed));
+      setTransactions(data.transactions);
+    }).catch(() => {
+      setApiReady(false);
+      setTransactions([]);
+      setNotice("Could not connect to the local transaction API");
+    });
   }, []);
 
   const expense = transactions.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
@@ -110,62 +114,127 @@ export default function Home() {
     value: transactions.filter(t => t.type === "expense" && t.category === name).reduce((s, t) => s + t.amount, 0),
   })).filter(x => x.value > 0).sort((a, b) => b.value - a.value), [transactions]);
   const visible = transactions.filter(t => (category === "All" || t.category === category) && `${t.merchant} ${t.note ?? ""}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.date.localeCompare(a.date));
-  const daily = Array.from({ length: 8 }, (_, i) => transactions.filter(t => t.type === "expense" && Number(t.date.slice(-2)) <= (i + 1) * 4).reduce((s, t) => s + t.amount, 0));
-  const maxDaily = Math.max(...daily, 1);
-  const points = daily.map((v, i) => `${i * 88 + 12},${210 - (v / maxDaily) * 175}`).join(" ");
+  const chartValues = useMemo(() => {
+    const expenses = transactions.filter(t => t.type === "expense");
+    if (chartMode === "weekly") {
+      const latest = expenses.reduce((max, tx) => tx.date > max ? tx.date : max, new Date().toISOString().slice(0, 10));
+      const end = new Date(`${latest}T12:00:00`);
+      return Array.from({ length: 7 }, (_, i) => {
+        const date = new Date(end);
+        date.setDate(end.getDate() - (6 - i));
+        const key = date.toISOString().slice(0, 10);
+        return expenses.filter(t => t.date === key).reduce((sum, tx) => sum + tx.amount, 0);
+      });
+    }
+
+    return Array.from({ length: 8 }, (_, i) => expenses
+      .filter(t => Number(t.date.slice(-2)) <= (i + 1) * 4)
+      .reduce((sum, tx) => sum + tx.amount, 0));
+  }, [chartMode, transactions]);
+  const chartLabels = chartMode === "weekly" ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] : ["1", "5", "9", "13", "17", "21", "25", "29"];
+  const maxDaily = Math.max(...chartValues, 1);
+  const chartStep = 616 / Math.max(chartValues.length - 1, 1);
+  const points = chartValues.map((v, i) => `${i * chartStep + 12},${210 - (v / maxDaily) * 175}`).join(" ");
+
+  async function readApiError(response: Response) {
+    const data = await response.json().catch(() => null) as { error?: string } | null;
+    return data?.error ?? "Request failed";
+  }
 
   async function saveTransaction(event: FormEvent) {
     event.preventDefault();
     if (!draft.merchant.trim() || draft.amount <= 0) return;
     const tx = { ...draft, amount: Number(draft.amount), category: draft.type === "income" ? "Income" : draft.category };
-    if (editing) {
-      setTransactions(x => x.map(t => t.id === editing ? { ...tx, id: editing } : t));
-      if (apiReady) await fetch(`/api/transactions/${editing}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tx) });
-      setNotice("Transaction updated");
-    } else {
-      let created = { ...tx, id: Date.now() };
-      if (apiReady) {
-        const response = await fetch("/api/transactions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(tx) });
-        if (response.ok) created = (await response.json() as { transaction: Transaction }).transaction;
-      }
-      setTransactions(x => [created, ...x]);
-      setNotice("Transaction added");
-    }
-    setModal(null); setEditing(null); setDraft(emptyDraft());
-    setTimeout(() => setNotice(""), 2500);
-  }
 
+    try {
+      if (editing) {
+        const response = await fetch(`/api/transactions/${editing}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(tx),
+        });
+        if (!response.ok) throw new Error(await readApiError(response));
+        const data = await response.json() as { transaction: Transaction };
+        setTransactions(rows => rows.map(row => row.id === editing ? data.transaction : row));
+        setNotice("Transaction updated");
+      } else {
+        const response = await fetch("/api/transactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(tx),
+        });
+        if (!response.ok) throw new Error(await readApiError(response));
+        const data = await response.json() as { transaction: Transaction };
+        setTransactions(rows => [data.transaction, ...rows]);
+        setNotice("Transaction added");
+      }
+      setModal(null);
+      setEditing(null);
+      setDraft(emptyDraft());
+      setTimeout(() => setNotice(""), 2500);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save transaction");
+    }
+  }
   function startEdit(tx: Transaction) {
     setDraft({ date: tx.date, merchant: tx.merchant, category: tx.category, amount: tx.amount, type: tx.type, note: tx.note ?? "" });
     setEditing(tx.id); setModal("add");
   }
 
   async function remove(id: number) {
-    setTransactions(x => x.filter(t => t.id !== id));
-    if (apiReady) await fetch(`/api/transactions/${id}`, { method: "DELETE" });
-    setNotice("Transaction deleted");
-    setTimeout(() => setNotice(""), 2500);
-  }
+    const transaction = transactions.find(tx => tx.id === id);
+    if (!window.confirm(`Delete ${transaction?.merchant ?? "this transaction"}?`)) return;
 
+    try {
+      const response = await fetch(`/api/transactions/${id}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await readApiError(response));
+      setTransactions(rows => rows.filter(tx => tx.id !== id));
+      setNotice("Transaction deleted");
+      setTimeout(() => setNotice(""), 2500);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not delete transaction");
+    }
+  }
   async function importFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
+
     try {
+      if (file.size > 10 * 1024 * 1024) throw new Error("CSV file must be 10 MB or smaller");
       const imported = parseCsv(await file.text());
-      if (apiReady) {
-        const response = await fetch("/api/transactions/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transactions: imported }) });
-        if (response.ok) {
-          const data = await response.json() as { transactions: Transaction[] };
-          setTransactions(x => [...data.transactions, ...x]);
-        }
-      } else setTransactions(x => [...imported, ...x]);
-      setModal(null); setNotice(`${imported.length} transactions imported`);
+      const response = await fetch("/api/transactions/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transactions: imported }),
+      });
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = await response.json() as { transactions: Transaction[] };
+      setTransactions(rows => [...data.transactions, ...rows]);
+      setModal(null);
+      setNotice(`${data.transactions.length} transactions imported`);
       setTimeout(() => setNotice(""), 3000);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not read that CSV file");
+    } finally {
+      event.target.value = "";
     }
   }
-
+  async function loadDemoData() {
+    try {
+      const response = await fetch("/api/transactions/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transactions: seed }),
+      });
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = await response.json() as { transactions: Transaction[] };
+      setTransactions(rows => [...data.transactions, ...rows]);
+      setNotice("Demo data loaded");
+      setTimeout(() => setNotice(""), 2500);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load demo data");
+    }
+  }
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -199,14 +268,14 @@ export default function Home() {
 
           <section className="dashboard-grid">
             <article className="card spending-card">
-              <div className="card-head"><div><h2>Spending overview</h2><p>Your cumulative monthly spending</p></div><div className="segmented"><button className="selected">Monthly</button><button>Weekly</button></div></div>
-              <div className="legend"><span><i className="mint" />July 2026 <b>{money.format(expense)}</b></span><span><i className="lavender" />June 2026 <b>{money.format(expense * .92)}</b></span></div>
+              <div className="card-head"><div><h2>Spending overview</h2><p>Your cumulative monthly spending</p></div><div className="segmented"><button type="button" className={chartMode === "monthly" ? "selected" : ""} onClick={() => setChartMode("monthly")}>Monthly</button><button type="button" className={chartMode === "weekly" ? "selected" : ""} onClick={() => setChartMode("weekly")}>Weekly</button></div></div>
+              <div className="legend"><span><i className="mint" />{chartMode === "monthly" ? "Current month" : "Current week"} <b>{money.format(expense)}</b></span><span><i className="lavender" />Comparison <b>{money.format(expense * .92)}</b></span></div>
               <svg className="chart" viewBox="0 0 640 240" role="img" aria-label="Cumulative spending chart">
                 {[35, 78, 122, 166, 210].map(y => <line key={y} x1="12" y1={y} x2="628" y2={y} className="gridline" />)}
                 <polyline points={points} className="chart-fill" />
                 <polyline points={points} className="chart-line" />
-                <polyline points={daily.map((v, i) => `${i * 88 + 12},${210 - ((v * .92) / maxDaily) * 175}`).join(" ")} className="chart-compare" />
-                {["1 Jul", "5 Jul", "9 Jul", "13 Jul", "17 Jul", "21 Jul", "25 Jul", "29 Jul"].map((d, i) => <text key={d} x={i * 88 + 12} y="235">{d}</text>)}
+                <polyline points={chartValues.map((v, i) => `${i * chartStep + 12},${210 - ((v * .92) / maxDaily) * 175}`).join(" ")} className="chart-compare" />
+                {chartLabels.map((d, i) => <text key={d} x={i * chartStep + 12} y="235">{d}</text>)}
               </svg>
               <div className="category-strip">
                 {byCategory.slice(0, 5).map(item => <div key={item.name}><span className="cat-icon" style={{ "--cat": categoryMeta[item.name]?.color } as React.CSSProperties}>{categoryMeta[item.name]?.icon}</span><div><small>{item.name}</small><strong>{money.format(item.value)}</strong></div></div>)}
@@ -225,7 +294,7 @@ export default function Home() {
         {(active === "Dashboard" || active === "Transactions") && <section className="card transactions-card">
           <div className="card-head"><div><h2>{active === "Dashboard" ? "Recent transactions" : "All transactions"}</h2><p>{visible.length} records</p></div><div className="filters"><input aria-label="Search transactions" placeholder="Search merchant…" value={query} onChange={e => setQuery(e.target.value)} /><select aria-label="Filter by category" value={category} onChange={e => setCategory(e.target.value)}><option>All</option>{categories.map(c => <option key={c}>{c}</option>)}</select></div></div>
           <div className="table-wrap"><table><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Amount</th><th aria-label="Actions"></th></tr></thead><tbody>{visible.slice(0, active === "Dashboard" ? 6 : 100).map(tx => <tr key={tx.id}><td>{new Date(`${tx.date}T12:00:00`).toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" })}</td><td><span className="merchant-icon">{tx.merchant.charAt(0)}</span><strong>{tx.merchant}</strong></td><td><span className="tag" style={{ "--cat": categoryMeta[tx.category]?.color } as React.CSSProperties}>{tx.category}</span></td><td className={tx.type}>{tx.type === "expense" ? "−" : "+"}{money.format(tx.amount)}</td><td><button className="row-action" aria-label={`Edit ${tx.merchant}`} onClick={() => startEdit(tx)}>Edit</button><button className="row-action danger" aria-label={`Delete ${tx.merchant}`} onClick={() => remove(tx.id)}>Delete</button></td></tr>)}</tbody></table></div>
-          {!visible.length && <div className="empty"><strong>No transactions found</strong><span>Try another search or add a new transaction.</span></div>}
+          {!visible.length && <div className="empty"><strong>No transactions found</strong><span>Try another search or add a new transaction.</span><button className="secondary" onClick={loadDemoData}>Load demo data</button></div>}
         </section>}
 
         {active === "Budgets" && <section className="standalone-grid">{Object.entries(budgets).map(([name, limit]) => { const spent = byCategory.find(x => x.name === name)?.value ?? 0; return <article className="card budget-tile" key={name}><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><h2>{name}</h2><strong>{money.format(spent)}</strong><p>of {money.format(limit)} monthly limit</p><div className="progress"><i style={{ width: `${Math.min(spent / limit * 100, 100)}%` }} /></div></article> })}</section>}

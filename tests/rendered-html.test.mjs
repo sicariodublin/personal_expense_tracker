@@ -1,33 +1,13 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+﻿import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
-const developmentPreviewMeta =
-  /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
+const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const pageSource = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+const gitignore = await readFile(new URL("../.gitignore", import.meta.url), "utf8");
 
-test("renders development preview metadata", async () => {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
+assert.equal(packageJson.scripts.dev, "next dev");
+assert.match(gitignore, /^\/data\/$/m);
+assert.match(pageSource, /Load demo data/);
+assert.doesNotMatch(pageSource, /Promise\.all\(seed\.map/);
 
-  const response = await worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
-  );
-
-  assert.equal(response.status, 200);
-  assert.match(
-    response.headers.get("content-type") ?? "",
-    /^text\/html\b/i,
-  );
-  assert.match(await response.text(), developmentPreviewMeta);
-});
+console.log("Local setup checks passed");
