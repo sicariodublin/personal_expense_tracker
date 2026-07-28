@@ -36,11 +36,14 @@ Implemented:
 
 - Responsive dashboard interface.
 - Manual transaction creation.
-- Transaction editing and deletion.
+- Transaction editing and deletion (with delete confirmation).
 - CSV parsing and bulk insertion.
-- Cloudflare D1 persistence.
+- Local JSON file persistence by default, with optional Cloudflare D1 persistence.
 - Category summaries.
-- Budget progress cards.
+- Editable budget progress cards (create, edit and delete budgets/categories from the UI).
+- User-created categories, with permanent starter categories plus user-added custom ones.
+- Month and year filtering on the Dashboard and Transactions views, applied across KPIs, chart, budgets and the transaction table.
+- A filtered-results totalizer (separate "Spent"/"Received" sums) next to the transaction search/category/month/year filters.
 - Search and category filters.
 - Basic API validation.
 - Production deployment through ChatGPT Sites.
@@ -48,12 +51,10 @@ Implemented:
 Not implemented:
 
 - Direct bank or Open Banking connections.
-- User-created categories.
-- Editable budget limits.
 - Recurring transactions.
 - Multiple accounts.
 - Multiple currencies.
-- Date-range and month selection.
+- Arbitrary date-range selection (only whole month/year granularity today).
 - CSV column-mapping interface.
 - Duplicate-import detection.
 - Automated transaction categorisation.
@@ -72,9 +73,10 @@ Not implemented:
 | Styling | Custom CSS | — | Complete dark responsive interface |
 | CSS tooling | Tailwind CSS | 4.2.1 | Installed and configured, although the main UI uses custom CSS |
 | API layer | Next.js route handlers | — | CRUD and bulk-import endpoints |
-| Database | Cloudflare D1 | SQLite-compatible | Persistent transaction storage |
-| ORM | Drizzle ORM | 0.45.2 | Typed database queries |
-| Migration tool | Drizzle Kit | 0.31.10 | SQL migration generation |
+| Local storage | JSON file (`data/transactions.json`) | — | Default persistence for local development, read/written by `db/transaction-store.ts` |
+| Database (optional) | Cloudflare D1 | SQLite-compatible | Used instead of the local JSON file only when `LEDGERLY_STORE=d1` and a Worker `DB` binding is available |
+| ORM | Drizzle ORM | 0.45.2 | Typed database queries (D1 path only) |
+| Migration tool | Drizzle Kit | 0.31.10 | SQL migration generation (D1 path only) |
 | Runtime | Cloudflare Workers | — | Runs the deployed server application |
 | Local Cloudflare tooling | Wrangler | 4.92.0 | Local Worker and D1 bindings |
 | Linting | ESLint | 9.39.4 | Static code checks |
@@ -90,10 +92,13 @@ flowchart TD
     CSV["CSV bank statement"] --> Parser["Client-side CSV parser"]
     Parser --> UI
     UI --> API["Next.js API routes"]
-    API --> ORM["Drizzle ORM"]
+    API --> Store["db/transaction-store.ts"]
+    Store --> JSON[("data/transactions.json (default)")]
+    Store --> ORM["Drizzle ORM (LEDGERLY_STORE=d1)"]
     ORM --> DB[("Cloudflare D1")]
+    JSON --> Store
     DB --> ORM
-    ORM --> API
+    Store --> API
     API --> UI
     Worker["Cloudflare Worker"] --> UI
     Worker --> API
@@ -101,11 +106,15 @@ flowchart TD
 
 ### Architectural responsibilities
 
-- `app/page.tsx` owns nearly all dashboard UI and client-side application state.
+- `app/page.tsx` owns nearly all dashboard UI and client-side application state,
+  including budgets, custom categories and the month/year period filter.
 - `app/globals.css` contains the full visual system and responsive layouts.
 - `app/api/transactions` exposes the transaction API.
-- `db/schema.ts` defines the transaction table.
-- `db/index.ts` provides the D1/Drizzle connection.
+- `db/transaction-store.ts` is the storage abstraction: it reads/writes
+  `data/transactions.json` by default, or delegates to Drizzle/D1 when
+  `LEDGERLY_STORE=d1` is set and a Worker `DB` binding exists.
+- `db/schema.ts` defines the transaction table (used only by the D1 path).
+- `db/index.ts` provides the D1/Drizzle connection (used only by the D1 path).
 - `worker/index.ts` is the Cloudflare Worker entry point.
 - `vite.config.ts` configures Vinext, Sites and local Cloudflare bindings.
 
@@ -127,9 +136,12 @@ ledgerly-personal-expense-tracker/
 │   └── page.tsx
 ├── build/
 │   └── sites-vite-plugin.ts
+├── data/
+│   └── transactions.json
 ├── db/
 │   ├── index.ts
-│   └── schema.ts
+│   ├── schema.ts
+│   └── transaction-store.ts
 ├── drizzle/
 │   ├── meta/
 │   └── 0000_slimy_liz_osborn.sql
@@ -189,17 +201,19 @@ routes.
 
 - `transactions`
 - active dashboard section
-- open modal
+- open modal (`add` / `import`) and the separate budget modal (`add` / `edit`)
 - transaction being edited
 - transaction form draft
-- search query
-- selected category filter
+- budgets (`Record<category, monthlyLimit>`, persisted to `localStorage`)
+- custom categories and hidden (deleted) starter categories, persisted to `localStorage`
+- search query, category filter, and month/year period filter
 - notification message
 - API availability state
 
 ### Calculated values
 
-The UI calculates the following in the browser:
+The UI calculates the following in the browser, all scoped to the selected
+month/year period (default "all time"):
 
 - Total expense.
 - Total income.
@@ -209,7 +223,9 @@ The UI calculates the following in the browser:
 - Spending totals by category.
 - Budget-use percentages.
 - Cumulative spending chart points.
-- Filtered and sorted transaction rows.
+- Filtered and sorted transaction rows (search + category + period).
+- A totalizer (separate "Spent" and "Received" sums) for whatever is currently
+  filtered by search/category/month/year.
 
 ### Important refactoring opportunity
 
@@ -316,13 +332,13 @@ sequenceDiagram
     participant User
     participant React as React UI
     participant API as Transaction API
-    participant DB as Cloudflare D1
+    participant Store as transaction-store.ts
 
     User->>React: Submit transaction form
     React->>API: POST /api/transactions
     API->>API: Validate merchant, date and amount
-    API->>DB: Insert using Drizzle ORM
-    DB-->>API: Return created record
+    API->>Store: Insert (local JSON by default, D1 if LEDGERLY_STORE=d1)
+    Store-->>API: Return created record
     API-->>React: 201 with transaction
     React-->>User: Refresh cards, chart and table
 ```
@@ -416,57 +432,97 @@ Recommended improvement: introduce a three-step import workflow:
 
 ## 10. Categories and budgets
 
-Current categories:
+Budgets and categories are now fully editable from the Budgets tab UI (no
+`window.prompt`, no hard-coded budget limits).
 
-- Groceries
-- Transport
-- Utilities
-- Health
-- Entertainment
-- Dining
-- Shopping
-- Housing
-- Income
-- Other
+Starter categories (defined as `baseCategories`/`baseCategoryMeta` in
+`app/page.tsx`):
 
-Current budget limits are hard-coded in `app/page.tsx`:
+- Groceries, Transport, Utilities, Health, Entertainment, Dining, Shopping,
+  Housing
+- Carro, Family, Self Care, Gym, Fee, Education, Gift, Loan/CreditCard,
+  Holidays, Investment, Licenses (added to match the imported real transaction
+  history — see section 11)
+- Income, Other (reserved; cannot be deleted)
 
-| Category | Monthly limit |
+On top of the starter list, users can add their own custom categories from the
+"+ Add budget" flow. Custom categories and their colour/icon are stored in
+`localStorage` under `ledgerly-custom-categories`.
+
+### Budget UI behaviour
+
+- **Add budget**: opens a modal with a toggle between an existing
+  budget-less category and typing a brand-new category name, plus a monthly
+  limit. A new category name gets an auto-assigned colour from
+  `categoryPalette` (first unused colour) and an icon (its first letter).
+- **Edit budget**: opens the same modal pre-filled with the current limit.
+- **Delete category**: fully removes the category — from budgets, the
+  category filter dropdown and the transaction form's category select — not
+  just the monthly limit. It asks for confirmation, and if the category is
+  still used by existing transactions it warns with the usage count first.
+  Existing transactions keep their original category label even after
+  deletion (only new selection is affected). `Other` and `Income` cannot be
+  deleted since the app depends on them (fallback category / forced income
+  category).
+
+### Persistence
+
+| Data | Storage |
 | --- | ---: |
-| Groceries | €600 |
-| Transport | €400 |
-| Utilities | €350 |
-| Entertainment | €120 |
+| Budgets (`Record<category, monthlyLimit>`) | `localStorage` (`ledgerly-budgets`) |
+| Custom categories | `localStorage` (`ledgerly-custom-categories`) |
+| Hidden/deleted starter categories | `localStorage` (`ledgerly-hidden-categories`) |
 
-These budget limits are not stored in the database and cannot currently be
-edited by the user.
+Budgets and categories are browser-local, not stored in `data/transactions.json`
+or D1. Clearing browser storage resets them to the starter defaults.
 
 Recommended improvement:
 
-- Add `categories` and `budgets` database tables.
-- Store budget month and year.
-- Allow creating, editing and archiving categories.
-- Keep category colours/icons separate from transaction records.
+- Move budgets/categories into the same persistence layer as transactions
+  (local JSON file or D1) so they survive a browser storage reset and could
+  sync across devices.
+- Store budget month and year explicitly, rather than one limit that applies
+  to whichever period is currently selected.
 
-## 11. Sample data
+## 11. Sample data and real transaction history
 
-The source contains fictional seed transactions for demonstration, including
-examples such as Tesco, Irish Rail, Electric Ireland, rent and salary.
+`data/transactions.json` currently holds the user's real historical expense
+data (2,606 transactions, 2023-01-01 to 2026-05-29), imported from a MySQL
+dump (`expenses` + `credits` tables) of a previous personal expense-tracking
+project. This is real financial history, not fictional demo data — treat
+`data/transactions.json` accordingly (see section 12 on privacy) and never
+commit it to a public repository.
 
-These values were not taken from a bank account or personal statement.
+Import notes, for anyone re-running or extending the migration:
+
+- Only the `expenses` and `credits` tables were imported. All auth/user
+  tables (`users`, `user_profiles`, tokens, `email_settings`,
+  `report_schedules`) were intentionally excluded.
+- `credits` rows always become `type: "income"`, category `Income` (Ledgerly
+  reserves the `Income` category for income-type rows).
+- `expenses` categories were mapped onto Ledgerly's category list; anything
+  without a direct match became one of the new starter categories listed in
+  section 10 (Carro, Family, Self Care, Gym, Fee, Education, Gift,
+  Loan/CreditCard, Holidays, Investment, Licenses). A handful of near-
+  duplicate spellings (`Self-Care`/`Fees`/`Gifts`, etc.) were folded into a
+  single canonical category.
+- `budget_goals` from the old dump were **not** migrated automatically
+  (budgets/categories live in `localStorage`, not the transactions file — see
+  section 10). They were reported to the user to re-enter manually via
+  "+ Add budget": Groceries €250, Licenses €50, Carro €300, Transport €100,
+  Eating Out (→ Dining) €150, Entertainment €60.
+
+Separately, the code still ships a small set of fictional seed transactions
+(`seed` constant in `app/page.tsx`: Tesco, Irish Rail, Electric Ireland, rent,
+salary) purely as optional demo data.
 
 Current behaviour:
 
-- The React state initially displays the fictional data.
-- The application requests stored transactions from the API.
-- If stored database transactions exist, they replace the sample data.
-- If the database is empty, the application attempts to insert the sample data.
-
-Recommended production change:
-
-- Remove automatic sample insertion.
-- Show a proper empty-state screen.
-- Offer an explicit `Load demo data` action if demonstrations are still useful.
+- On load, the app fetches transactions from `/api/transactions`
+  (`data/transactions.json` by default).
+- If the transaction list is empty, the Transactions/Dashboard empty state
+  shows a "Load demo data" button that inserts the fictional `seed` records —
+  nothing is inserted automatically.
 
 ## 12. Authentication and privacy
 
@@ -659,22 +715,39 @@ Recommended test layers:
 
 ## 17. Known technical debt and risks
 
-1. `app/page.tsx` is too large and has several responsibilities.
-2. Sample records are automatically inserted into an empty database.
-3. Budget values are hard-coded.
+1. `app/page.tsx` is too large and has several responsibilities (now larger
+   still after adding budgets/categories/period-filter logic — a stronger
+   candidate for the section 6 component/hook split than before).
+2. ~~Sample records are automatically inserted into an empty database.~~
+   Resolved: demo data now requires an explicit "Load demo data" click.
+3. ~~Budget values are hard-coded.~~ Resolved: budgets and categories are
+   fully editable from the UI (section 10), though they live in
+   `localStorage` rather than the transactions store.
 4. The CSV parser is custom and limited.
 5. Duplicate imports are possible.
 6. Money uses floating-point database values.
 7. Update/delete routes need stronger validation and not-found responses.
 8. Most calculations occur client-side.
-9. The dashboard month is effectively fixed to July 2026 in labels and logic.
+9. ~~The dashboard month is effectively fixed to July 2026 in labels and
+   logic.~~ Resolved: month/year filtering drives the header label, KPIs,
+   chart, budgets and transaction table. Remaining gap: no arbitrary
+   date-range picker, and the "Monthly" chart mode buckets by day-of-month,
+   so it isn't meaningful when "All months" is selected across a year.
 10. The chart is a simple custom SVG rather than a reusable chart component.
 11. API errors can fall back to local sample state, which may hide server
     failures from the user.
-12. There is no deletion confirmation.
-13. There is no transaction pagination.
+12. ~~There is no deletion confirmation.~~ Resolved for transactions
+    (`window.confirm` before delete) and for budget-category deletion
+    (confirms, and warns with a usage count if transactions still reference
+    the category).
+13. There is no transaction pagination (now more pressing: the transaction
+    table caps at the first 100 rows client-side, and the real imported
+    history has 2,606 rows).
 14. Multi-user ownership is not implemented.
 15. Automated test coverage is minimal.
+16. Budgets/custom categories are stored in `localStorage`, not alongside
+    transactions — they don't survive a browser storage reset and won't sync
+    across devices/browsers.
 
 ## 18. Recommended development roadmap
 
@@ -690,10 +763,12 @@ Recommended test layers:
 
 ### Phase 2 — Improve transaction management
 
-- Add month/date-range filtering.
+- ~~Add month/date-range filtering.~~ Done for month/year; arbitrary
+  date-range selection is still open.
 - Add transaction pagination.
-- Add user-defined categories.
-- Store budgets in D1.
+- ~~Add user-defined categories.~~ Done (section 10).
+- Move budgets/categories out of `localStorage` into the transactions store
+  (local JSON or D1), so they're not lost on a storage reset.
 - Add recurring transaction support.
 - Add CSV preview and column mapping.
 - Detect duplicates before import.
@@ -734,11 +809,18 @@ Before changing code, Codex should:
 
 ### Suggested first prompt for Codex
 
+This example prompt is kept as a historical illustration of the original
+Phase 1 ask. Items 1 and 2 below are already done (see sections 11 and 17) —
+a future agent should confirm current state against this document rather than
+re-doing them. Note also that the *default* storage is now the local JSON
+file (`data/transactions.json`), not Cloudflare D1 — see sections 3 and 4.
+
 ```text
 Read LEDGERLY_PROJECT_HANDOVER.md and inspect the project before changing
 anything. Confirm the architecture, run the existing lint and tests, and report
 any local setup problems. Preserve the current dark visual design and existing
-ChatGPT Sites/Vinext/Cloudflare D1 architecture.
+ChatGPT Sites/Vinext architecture (local JSON storage by default, Cloudflare D1
+optional via LEDGERLY_STORE=d1).
 
 After the review, propose a small staged plan to:
 1. remove automatic sample-data insertion,

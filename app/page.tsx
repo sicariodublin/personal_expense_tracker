@@ -14,8 +14,8 @@ type Transaction = {
 
 type Draft = Omit<Transaction, "id">;
 
-const categories = ["Groceries", "Transport", "Utilities", "Health", "Entertainment", "Dining", "Shopping", "Housing", "Income", "Other"];
-const categoryMeta: Record<string, { icon: string; color: string }> = {
+const baseCategories = ["Groceries", "Transport", "Utilities", "Health", "Entertainment", "Dining", "Shopping", "Housing", "Carro", "Family", "Self Care", "Gym", "Fee", "Education", "Gift", "Loan/CreditCard", "Holidays", "Investment", "Licenses", "Income", "Other"];
+const baseCategoryMeta: Record<string, { icon: string; color: string }> = {
   Groceries: { icon: "G", color: "#7cf5c8" },
   Transport: { icon: "T", color: "#69a8ff" },
   Utilities: { icon: "U", color: "#ffc85c" },
@@ -24,9 +24,22 @@ const categoryMeta: Record<string, { icon: string; color: string }> = {
   Dining: { icon: "D", color: "#ffac73" },
   Shopping: { icon: "S", color: "#ef8cff" },
   Housing: { icon: "H", color: "#68d6e8" },
+  Carro: { icon: "C", color: "#c9a7ff" },
+  Family: { icon: "F", color: "#5ce1c9" },
+  "Self Care": { icon: "S", color: "#ffd166" },
+  Gym: { icon: "G", color: "#a8e6cf" },
+  Fee: { icon: "F", color: "#ff9f9f" },
+  Education: { icon: "E", color: "#8ecae6" },
+  Gift: { icon: "G", color: "#f7b2ff" },
+  "Loan/CreditCard": { icon: "L", color: "#e07a5f" },
+  Holidays: { icon: "H", color: "#ffe066" },
+  Investment: { icon: "I", color: "#6fcf97" },
+  Licenses: { icon: "L", color: "#ff7b86" },
   Income: { icon: "I", color: "#7cf5c8" },
   Other: { icon: "O", color: "#8d9aaf" },
 };
+const categoryPalette = ["#7cf5c8", "#69a8ff", "#ffc85c", "#b7a4ff", "#ff8e9a", "#ffac73", "#ef8cff", "#68d6e8", "#ff7b86", "#5ce1c9", "#c9a7ff", "#ffd166"];
+const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
 const seed: Transaction[] = [
   { id: 1, date: "2026-07-25", merchant: "Tesco Balbriggan", category: "Groceries", amount: 68.42, type: "expense" },
@@ -51,6 +64,26 @@ function loadSavedBudgets() {
     return saved ? JSON.parse(saved) as Record<string, number> : defaultBudgets;
   } catch {
     return defaultBudgets;
+  }
+}
+
+function loadSavedCategories(): Record<string, { icon: string; color: string }> {
+  if (typeof window === "undefined") return {};
+  try {
+    const saved = localStorage.getItem("ledgerly-custom-categories");
+    return saved ? JSON.parse(saved) as Record<string, { icon: string; color: string }> : {};
+  } catch {
+    return {};
+  }
+}
+
+function loadHiddenCategories(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const saved = localStorage.getItem("ledgerly-hidden-categories");
+    return saved ? JSON.parse(saved) as string[] : [];
+  } catch {
+    return [];
   }
 }
 const emptyDraft = (): Draft => ({ date: new Date().toISOString().slice(0, 10), merchant: "", category: "Groceries", amount: 0, type: "expense", note: "" });
@@ -97,12 +130,20 @@ export default function Home() {
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft());
   const [budgets, setBudgets] = useState<Record<string, number>>(() => loadSavedBudgets());
+  const [customCategories, setCustomCategories] = useState<Record<string, { icon: string; color: string }>>(() => loadSavedCategories());
+  const [hiddenCategories, setHiddenCategories] = useState<string[]>(() => loadHiddenCategories());
+  const [budgetModal, setBudgetModal] = useState<{ mode: "add" | "edit"; name: string; useNew: boolean; newName: string; amount: string } | null>(null);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
+  const [filterYear, setFilterYear] = useState("All");
+  const [filterMonth, setFilterMonth] = useState("All");
   const [notice, setNotice] = useState("");
   const [, setApiReady] = useState(false);
   const [chartMode, setChartMode] = useState<"monthly" | "weekly">("monthly");
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const categoryMeta = useMemo(() => ({ ...baseCategoryMeta, ...customCategories }), [customCategories]);
+  const categories = useMemo(() => [...baseCategories.filter(c => c !== "Other" && !hiddenCategories.includes(c)), ...Object.keys(customCategories), "Other"], [customCategories, hiddenCategories]);
 
   useEffect(() => {
     fetch("/api/transactions").then(async r => {
@@ -118,17 +159,28 @@ export default function Home() {
   }, []);
 
 
-  const expense = transactions.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
-  const income = transactions.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const availableYears = useMemo(() => Array.from(new Set(transactions.map(t => t.date.slice(0, 4)))).sort((a, b) => b.localeCompare(a)), [transactions]);
+  const periodTransactions = useMemo(() => transactions.filter(t =>
+    (filterYear === "All" || t.date.slice(0, 4) === filterYear) &&
+    (filterMonth === "All" || t.date.slice(5, 7) === filterMonth)
+  ), [transactions, filterYear, filterMonth]);
+  const periodLabel = filterYear === "All" && filterMonth === "All"
+    ? "all time"
+    : [filterMonth !== "All" ? monthNames[Number(filterMonth) - 1] : null, filterYear !== "All" ? filterYear : null].filter(Boolean).join(" ");
+
+  const expense = periodTransactions.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const income = periodTransactions.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
   const balance = income - expense;
   const byCategory = useMemo(() => categories.map(name => ({
     name,
-    value: transactions.filter(t => t.type === "expense" && t.category === name).reduce((s, t) => s + t.amount, 0),
-  })).filter(x => x.value > 0).sort((a, b) => b.value - a.value), [transactions]);
-  const visible = transactions.filter(t => (category === "All" || t.category === category) && `${t.merchant} ${t.note ?? ""}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.date.localeCompare(a.date));
+    value: periodTransactions.filter(t => t.type === "expense" && t.category === name).reduce((s, t) => s + t.amount, 0),
+  })).filter(x => x.value > 0).sort((a, b) => b.value - a.value), [periodTransactions, categories]);
+  const visible = periodTransactions.filter(t => (category === "All" || t.category === category) && `${t.merchant} ${t.note ?? ""}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.date.localeCompare(a.date));
+  const visibleSpent = visible.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const visibleReceived = visible.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
   const budgetCategoryNames = categories.filter(name => name !== "Income");
   const chartValues = useMemo(() => {
-    const expenses = transactions.filter(t => t.type === "expense");
+    const expenses = periodTransactions.filter(t => t.type === "expense");
     if (chartMode === "weekly") {
       const latest = expenses.reduce((max, tx) => tx.date > max ? tx.date : max, new Date().toISOString().slice(0, 10));
       const end = new Date(`${latest}T12:00:00`);
@@ -143,7 +195,7 @@ export default function Home() {
     return Array.from({ length: 8 }, (_, i) => expenses
       .filter(t => Number(t.date.slice(-2)) <= (i + 1) * 4)
       .reduce((sum, tx) => sum + tx.amount, 0));
-  }, [chartMode, transactions]);
+  }, [chartMode, periodTransactions]);
   const chartLabels = chartMode === "weekly" ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] : ["1", "5", "9", "13", "17", "21", "25", "29"];
   const maxDaily = Math.max(...chartValues, 1);
   const chartStep = 616 / Math.max(chartValues.length - 1, 1);
@@ -166,29 +218,74 @@ export default function Home() {
     localStorage.setItem("ledgerly-budgets", JSON.stringify(nextBudgets));
   }
 
-  function editBudget(name: string, current: number) {
-    const raw = window.prompt(`Monthly budget for ${name}. Leave blank or enter 0 to remove it.`, current ? String(current) : "");
-    if (raw === null) return;
-    const trimmed = raw.trim();
-    const amount = Number(trimmed.replace(",", "."));
+  function persistCustomCategories(next: Record<string, { icon: string; color: string }>) {
+    setCustomCategories(next);
+    localStorage.setItem("ledgerly-custom-categories", JSON.stringify(next));
+  }
 
-    if (!trimmed || amount === 0) {
-      const next = { ...budgets };
-      delete next[name];
-      persistBudgets(next);
-      setNotice(`${name} budget removed`);
-      setTimeout(() => setNotice(""), 2500);
+  function persistHiddenCategories(next: string[]) {
+    setHiddenCategories(next);
+    localStorage.setItem("ledgerly-hidden-categories", JSON.stringify(next));
+  }
+
+  function openBudgetModal(mode: "add" | "edit", name = "", amount = 0) {
+    setBudgetModal({ mode, name, useNew: mode === "add", newName: "", amount: amount ? String(amount) : "" });
+  }
+
+  function saveBudgetModal(event: FormEvent) {
+    event.preventDefault();
+    if (!budgetModal) return;
+    const targetName = budgetModal.useNew ? budgetModal.newName.trim() : budgetModal.name;
+    if (!targetName) {
+      setNotice("Enter a category name");
       return;
     }
 
-    if (!Number.isFinite(amount) || amount < 0) {
+    const amount = Number(budgetModal.amount.trim().replace(",", "."));
+    if (!Number.isFinite(amount) || amount <= 0) {
       setNotice("Enter a valid budget amount");
       return;
     }
 
-    persistBudgets({ ...budgets, [name]: Math.round(amount * 100) / 100 });
-    setNotice(`${name} budget saved`);
+    if (!categories.includes(targetName)) {
+      const usedColors = new Set(Object.values(categoryMeta).map(m => m.color));
+      const color = categoryPalette.find(c => !usedColors.has(c)) ?? categoryPalette[Object.keys(customCategories).length % categoryPalette.length];
+      persistCustomCategories({ ...customCategories, [targetName]: { icon: targetName.charAt(0).toUpperCase(), color } });
+    }
+
+    persistBudgets({ ...budgets, [targetName]: Math.round(amount * 100) / 100 });
+    setNotice(`${targetName} budget saved`);
     setTimeout(() => setNotice(""), 2500);
+    setBudgetModal(null);
+  }
+
+  function deleteBudgetCategory(name: string) {
+    if (name === "Other" || name === "Income") {
+      setNotice(`${name} can't be removed`);
+      return;
+    }
+
+    const usageCount = transactions.filter(t => t.category === name).length;
+    const warning = usageCount
+      ? `Delete the "${name}" category? ${usageCount} existing transaction${usageCount === 1 ? "" : "s"} will keep this label but it won't be selectable anymore.`
+      : `Delete the "${name}" category?`;
+    if (!window.confirm(warning)) return;
+
+    const nextBudgets = { ...budgets };
+    delete nextBudgets[name];
+    persistBudgets(nextBudgets);
+
+    if (name in customCategories) {
+      const nextCustom = { ...customCategories };
+      delete nextCustom[name];
+      persistCustomCategories(nextCustom);
+    } else {
+      persistHiddenCategories([...hiddenCategories, name]);
+    }
+
+    setNotice(`${name} category deleted`);
+    setTimeout(() => setNotice(""), 2500);
+    setBudgetModal(null);
   }
 
   async function saveTransaction(event: FormEvent) {
@@ -302,7 +399,7 @@ export default function Home() {
 
       <section className="content">
         <header>
-          <div><p className="eyebrow">{active === "Dashboard" ? "FINANCIAL OVERVIEW" : active.toUpperCase()}</p><h1>{active === "Dashboard" ? "Good evening, Fabio" : active}</h1><p className="subtle">Here&apos;s your financial overview for July 2026</p></div>
+          <div><p className="eyebrow">{active === "Dashboard" ? "FINANCIAL OVERVIEW" : active.toUpperCase()}</p><h1>{active === "Dashboard" ? "Good evening, Fabio" : active}</h1><p className="subtle">Here&apos;s your financial overview for {periodLabel}</p></div>
           <div className="header-actions"><button className="secondary" onClick={() => setModal("import")}>⇧ Import CSV</button><button className="primary" onClick={() => { setDraft(emptyDraft()); setEditing(null); setModal("add"); }}>＋ Add transaction</button></div>
         </header>
 
@@ -311,7 +408,7 @@ export default function Home() {
             {[
               ["Balance", balance, "Available now", "↗"],
               ["Income", income, "This month", "↓"],
-              ["Spent", expense, `${transactions.filter(t => t.type === "expense").length} transactions`, "↑"],
+              ["Spent", expense, `${periodTransactions.filter(t => t.type === "expense").length} transactions`, "↑"],
               ["Savings", Math.max(balance, 0), income ? `${Math.max((balance / income) * 100, 0).toFixed(0)}% savings rate` : "No income yet", "◇"],
             ].map(([label, value, meta, icon], i) => <article className={`kpi k${i}`} key={String(label)}><div className="kpi-icon">{icon}</div><div><span>{label}</span><strong>{money.format(Number(value))}</strong><small>{meta}</small></div></article>)}
           </section>
@@ -333,8 +430,8 @@ export default function Home() {
             </article>
 
             <div className="right-stack">
-              <article className="card budget-card"><div className="card-head"><div><h2>Budget progress</h2><p>July category limits</p></div><button className="text-button" onClick={() => setActive("Budgets")}>View all</button></div>
-                {Object.entries(budgets).map(([name, limit]) => { const spent = byCategory.find(x => x.name === name)?.value ?? 0; const pct = Math.min(Math.round(spent / limit * 100), 100); return <div className="budget-row" key={name}><div><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><span>{name}</span><small>{money.format(spent)} / {money.format(limit)}</small><b>{pct}%</b><button type="button" className="row-action" onClick={() => editBudget(name, limit)}>Edit</button></div><div className="progress"><i style={{ width: `${pct}%` }} /></div></div> })}
+              <article className="card budget-card"><div className="card-head"><div><h2>Budget progress</h2><p>{periodLabel} category limits</p></div><button className="text-button" onClick={() => setActive("Budgets")}>View all</button></div>
+                {Object.entries(budgets).map(([name, limit]) => { const spent = byCategory.find(x => x.name === name)?.value ?? 0; const pct = Math.min(Math.round(spent / limit * 100), 100); return <div className="budget-row" key={name}><div><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><span>{name}</span><small>{money.format(spent)} / {money.format(limit)}</small><b>{pct}%</b><button type="button" className="row-action" onClick={() => openBudgetModal("edit", name, limit)}>Edit</button></div><div className="progress"><i style={{ width: `${pct}%` }} /></div></div> })}
               </article>
               <article className="card insight-card"><span className="insight-icon">↗</span><div><h3>{balance >= 0 ? "You're on track" : "Review your spending"}</h3><p>{balance >= 0 ? `You kept ${money.format(balance)} after expenses this month.` : `Spending is ${money.format(Math.abs(balance))} above income.`}</p></div></article>
             </div>
@@ -342,12 +439,13 @@ export default function Home() {
         </>}
 
         {(active === "Dashboard" || active === "Transactions") && <section className="card transactions-card">
-          <div className="card-head"><div><h2>{active === "Dashboard" ? "Recent transactions" : "All transactions"}</h2><p>{visible.length} records</p></div><div className="filters"><input aria-label="Search transactions" placeholder="Search merchant…" value={query} onChange={e => setQuery(e.target.value)} /><select aria-label="Filter by category" value={category} onChange={e => setCategory(e.target.value)}><option>All</option>{categories.map(c => <option key={c}>{c}</option>)}</select></div></div>
+          <div className="card-head"><div><h2>{active === "Dashboard" ? "Recent transactions" : "All transactions"}</h2><p>{visible.length} records{visibleSpent > 0 && <> • Spent <b>{money.format(visibleSpent)}</b></>}{visibleReceived > 0 && <> • Received <b>{money.format(visibleReceived)}</b></>}</p></div><div className="filters"><input aria-label="Search transactions" placeholder="Search merchant…" value={query} onChange={e => setQuery(e.target.value)} /><select aria-label="Filter by month" value={filterMonth} onChange={e => setFilterMonth(e.target.value)}><option value="All">All months</option>{monthNames.map((name, i) => <option key={name} value={String(i + 1).padStart(2, "0")}>{name}</option>)}</select><select aria-label="Filter by year" value={filterYear} onChange={e => setFilterYear(e.target.value)}><option value="All">All years</option>{availableYears.map(y => <option key={y} value={y}>{y}</option>)}</select><select aria-label="Filter by category" value={category} onChange={e => setCategory(e.target.value)}><option>All</option>{categories.map(c => <option key={c}>{c}</option>)}</select></div></div>
           <div className="table-wrap"><table><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Amount</th><th aria-label="Actions"></th></tr></thead><tbody>{visible.slice(0, active === "Dashboard" ? 6 : 100).map(tx => <tr key={tx.id}><td>{new Date(`${tx.date}T12:00:00`).toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" })}</td><td><span className="merchant-icon">{tx.merchant.charAt(0)}</span><strong>{tx.merchant}</strong></td><td><span className="tag" style={{ "--cat": categoryMeta[tx.category]?.color } as React.CSSProperties}>{tx.category}</span></td><td className={tx.type}>{tx.type === "expense" ? "−" : "+"}{money.format(tx.amount)}</td><td><button className="row-action" aria-label={`Edit ${tx.merchant}`} onClick={() => startEdit(tx)}>Edit</button><button className="row-action danger" aria-label={`Delete ${tx.merchant}`} onClick={() => remove(tx.id)}>Delete</button></td></tr>)}</tbody></table></div>
           {!visible.length && <div className="empty"><strong>No transactions found</strong><span>Try another search or add a new transaction.</span><button className="secondary" onClick={loadDemoData}>Load demo data</button></div>}
         </section>}
 
-        {active === "Budgets" && <section className="standalone-grid">{budgetCategoryNames.map((name) => { const limit = budgets[name] ?? 0; const spent = byCategory.find(x => x.name === name)?.value ?? 0; const pct = limit ? Math.min(spent / limit * 100, 100) : 0; return <article className="card budget-tile" key={name}><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><h2>{name}</h2><strong>{money.format(spent)}</strong><p>{limit ? `of ${money.format(limit)} monthly limit` : "No monthly limit set"}</p><button type="button" className="secondary budget-edit" onClick={() => editBudget(name, limit)}>{limit ? "Edit budget" : "Set budget"}</button><div className="progress"><i style={{ width: `${pct}%` }} /></div></article> })}</section>}
+        {active === "Budgets" && <><div className="card-head budgets-head"><div><h2>Budgets</h2><p>Set a monthly limit per category, or add a new one</p></div><button type="button" className="primary" onClick={() => openBudgetModal("add")}>+ Add budget</button></div>
+        <section className="standalone-grid">{budgetCategoryNames.map((name) => { const limit = budgets[name] ?? 0; const spent = byCategory.find(x => x.name === name)?.value ?? 0; const pct = limit ? Math.min(spent / limit * 100, 100) : 0; return <article className="card budget-tile" key={name}><span className="cat-icon" style={{ "--cat": categoryMeta[name].color } as React.CSSProperties}>{categoryMeta[name].icon}</span><h2>{name}</h2><strong>{money.format(spent)}</strong><p>{limit ? `of ${money.format(limit)} monthly limit` : "No monthly limit set"}</p><button type="button" className="secondary budget-edit" onClick={() => openBudgetModal("edit", name, limit)}>{limit ? "Edit budget" : "Set budget"}</button><div className="progress"><i style={{ width: `${pct}%` }} /></div></article> })}</section></>}
         {active === "Insights" && <section className="standalone-grid insights">{byCategory.map(item => <article className="card budget-tile" key={item.name}><span className="cat-icon" style={{ "--cat": categoryMeta[item.name]?.color } as React.CSSProperties}>{categoryMeta[item.name]?.icon}</span><h2>{item.name}</h2><strong>{money.format(item.value)}</strong><p>{expense ? (item.value / expense * 100).toFixed(1) : 0}% of total spending</p></article>)}</section>}
       </section>
 
@@ -364,6 +462,24 @@ export default function Home() {
           <input ref={fileRef} hidden type="file" accept=".csv,text/csv" onChange={importFile} />
           <span className="upload-icon">⇧</span><h3>Choose your bank statement</h3><p>Upload a CSV from your bank. We&apos;ll detect common Date, Description, Debit, Credit and Amount columns.</p><button className="primary">Choose CSV file</button><small>CSV only • Maximum 10 MB</small>
         </div>}
+      </section></div>}
+
+      {budgetModal && <div className="modal-backdrop" onMouseDown={() => setBudgetModal(null)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="budget-modal-title" onMouseDown={e => e.stopPropagation()}>
+        <div className="modal-head"><div><span className="eyebrow">BUDGET</span><h2 id="budget-modal-title">{budgetModal.mode === "add" ? "Add budget" : `Edit ${budgetModal.name} budget`}</h2></div><button aria-label="Close" onClick={() => setBudgetModal(null)}>×</button></div>
+        <form onSubmit={saveBudgetModal}>
+          {budgetModal.mode === "add" && <>
+            <div className="type-toggle"><button type="button" className={!budgetModal.useNew ? "selected" : ""} onClick={() => setBudgetModal({ ...budgetModal, useNew: false })}>Existing category</button><button type="button" className={budgetModal.useNew ? "selected" : ""} onClick={() => setBudgetModal({ ...budgetModal, useNew: true })}>New category</button></div>
+            {budgetModal.useNew
+              ? <label>Category name<input required autoFocus value={budgetModal.newName} onChange={e => setBudgetModal({ ...budgetModal, newName: e.target.value })} placeholder="e.g. Subscriptions" /></label>
+              : <label>Category<select required value={budgetModal.name} onChange={e => setBudgetModal({ ...budgetModal, name: e.target.value })}><option value="" disabled>Choose a category…</option>{categories.filter(c => c !== "Income" && !(c in budgets)).map(c => <option key={c}>{c}</option>)}</select></label>}
+          </>}
+          <label>Monthly limit (€)<input required autoFocus={budgetModal.mode === "edit"} type="number" min="0.01" step="0.01" value={budgetModal.amount} onChange={e => setBudgetModal({ ...budgetModal, amount: e.target.value })} placeholder="0.00" /></label>
+          <div className="modal-actions">
+            {budgetModal.mode === "edit" && <button type="button" className="secondary danger" onClick={() => deleteBudgetCategory(budgetModal.name)}>Delete category</button>}
+            <button type="button" className="secondary" onClick={() => setBudgetModal(null)}>Cancel</button>
+            <button className="primary">Save budget</button>
+          </div>
+        </form>
       </section></div>}
       {notice && <div className="toast" role="status">{notice}</div>}
     </main>
