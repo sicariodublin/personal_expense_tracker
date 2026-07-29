@@ -88,6 +88,9 @@ td.amount,td.expense { color:#f1f4f8;text-align:right;font-variant-numeric:tabul
 th:nth-child(4) { text-align:right; }
 .row-action.danger { color:var(--coral);margin-left:6px; }
 .empty { padding:40px;display:flex;flex-direction:column;align-items:center;color:var(--muted);gap:7px; }.empty strong { color:var(--text); }
+.pagination { display:flex;justify-content:center;align-items:center;gap:16px;padding-top:18px;color:var(--muted);font-size:12px; }
+.pagination button { min-height:36px;padding:0 16px; }
+.pagination button:disabled { opacity:.4;cursor:not-allowed; }
 .standalone-grid { display:grid;grid-template-columns:repeat(4,1fr);gap:16px; }
 .budget-tile { min-height:230px; }.budget-tile .cat-icon { width:45px;height:45px;margin-bottom:25px; }.budget-tile h2 { color:var(--muted); }.budget-tile>strong { font-size:26px;display:block;margin:8px 0; }.budget-tile p { color:var(--muted);font-size:12px;margin-bottom:16px; }.budget-edit { margin:0 0 18px;padding:0 14px;min-height:36px; }
 .modal-backdrop { position:fixed;inset:0;background:rgba(2,6,12,.78);backdrop-filter:blur(6px);display:grid;place-items:center;padding:20px;z-index:20; }

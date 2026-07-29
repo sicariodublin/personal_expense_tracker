@@ -40,6 +40,7 @@ const baseCategoryMeta: Record<string, { icon: string; color: string }> = {
 };
 const categoryPalette = ["#7cf5c8", "#69a8ff", "#ffc85c", "#b7a4ff", "#ff8e9a", "#ffac73", "#ef8cff", "#68d6e8", "#ff7b86", "#5ce1c9", "#c9a7ff", "#ffd166"];
 const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const PAGE_SIZE = 50;
 
 const seed: Transaction[] = [
   { id: 1, date: "2026-07-25", merchant: "Tesco Balbriggan", category: "Groceries", amount: 68.42, type: "expense" },
@@ -88,6 +89,24 @@ function loadHiddenCategories(): string[] {
 }
 const emptyDraft = (): Draft => ({ date: new Date().toISOString().slice(0, 10), merchant: "", category: "Groceries", amount: 0, type: "expense", note: "" });
 
+function deriveCategory(merchant: string): string {
+  const n = merchant.toUpperCase();
+  if (/NETFLIX|SPOTIFY/.test(n)) return "Entertainment";
+  if (/LIDL|ALDI|TESCO|SUPERVALU|SPAR|MORE 4|POLSKI/.test(n)) return "Groceries";
+  if (/APPLEGREEN|PETROL|PARKING|ONLINE MOTOR|TOLL/.test(n)) return "Carro";
+  if (/AIB CARD PYMT|NAPS LOAN|PREMIUM CREDIT/.test(n)) return "Loan/CreditCard";
+  if (/IRISH LIFE|BRECAN PHARM|GET HEALTH|THE MEDICAL CE/.test(n)) return "Health";
+  if (/BORD GAIS|EIR|RENT|GAS|MORIARTY REAL/.test(n)) return "Utilities";
+  if (/APACHE PIZZA|SPAR EAST|EDDIE ROCKETS/.test(n)) return "Dining";
+  if (/\bFEE\b|\bTAX\b|STAMP DUTY/.test(n)) return "Fee";
+  if (/MICROSOFT|APPLE|GOOGLE|OPENAI|TRAE/.test(n)) return "Licenses";
+  if (/LEAP CARD|IRISH RAIL/.test(n)) return "Transport";
+  if (/HUMMGROUP|FOOT LOCKER/.test(n)) return "Gift";
+  if (/PLATINUM/.test(n)) return "Gym";
+  if (/GUSTAVO|HP NUTRITION|SP DISCOUNT|IHERB|VITAMIN SHOP|MOV &/.test(n)) return "Self Care";
+  return "Other";
+}
+
 function parseCsv(text: string): Transaction[] {
   const lines = text.replace(/\r/g, "").split("\n").filter(Boolean);
   if (lines.length < 2) throw new Error("The CSV file does not contain any transactions.");
@@ -116,11 +135,15 @@ function parseCsv(text: string): Transaction[] {
       id: Date.now() + index,
       date: Number.isNaN(parsed.getTime()) ? new Date().toISOString().slice(0, 10) : parsed.toISOString().slice(0, 10),
       merchant: row[descIdx] || "Imported transaction",
-      category: type === "income" ? "Income" : "Other",
+      category: type === "income" ? "Income" : deriveCategory(row[descIdx] || ""),
       amount,
       type,
     };
   }).filter(t => t.amount > 0);
+}
+
+function transactionSignature(t: { date: string; merchant: string; amount: number; type: string }) {
+  return `${t.date}|${t.merchant.trim().toLowerCase()}|${t.amount.toFixed(2)}|${t.type}`;
 }
 
 export default function Home() {
@@ -137,6 +160,7 @@ export default function Home() {
   const [category, setCategory] = useState("All");
   const [filterYear, setFilterYear] = useState("All");
   const [filterMonth, setFilterMonth] = useState("All");
+  const [page, setPage] = useState(1);
   const [notice, setNotice] = useState("");
   const [, setApiReady] = useState(false);
   const [chartMode, setChartMode] = useState<"monthly" | "weekly">("monthly");
@@ -178,6 +202,10 @@ export default function Home() {
   const visible = periodTransactions.filter(t => (category === "All" || t.category === category) && `${t.merchant} ${t.note ?? ""}`.toLowerCase().includes(query.toLowerCase())).sort((a, b) => b.date.localeCompare(a.date));
   const visibleSpent = visible.filter(t => t.type === "expense").reduce((s, t) => s + t.amount, 0);
   const visibleReceived = visible.filter(t => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pageRows = active === "Dashboard" ? visible.slice(0, 6) : visible.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
   const budgetCategoryNames = categories.filter(name => name !== "Income");
   const chartValues = useMemo(() => {
     const expenses = periodTransactions.filter(t => t.type === "expense");
@@ -349,17 +377,45 @@ export default function Home() {
     try {
       if (file.size > 10 * 1024 * 1024) throw new Error("CSV file must be 10 MB or smaller");
       const imported = parseCsv(await file.text());
+
+      const existingCounts = new Map<string, number>();
+      for (const t of transactions) {
+        const sig = transactionSignature(t);
+        existingCounts.set(sig, (existingCounts.get(sig) ?? 0) + 1);
+      }
+      const uniqueImports: Transaction[] = [];
+      let duplicateCount = 0;
+      for (const t of imported) {
+        const sig = transactionSignature(t);
+        const remaining = existingCounts.get(sig) ?? 0;
+        if (remaining > 0) {
+          existingCounts.set(sig, remaining - 1);
+          duplicateCount++;
+        } else {
+          uniqueImports.push(t);
+        }
+      }
+
+      if (!uniqueImports.length) {
+        setNotice(`All ${duplicateCount} transaction${duplicateCount === 1 ? "" : "s"} in that file already exist — nothing imported`);
+        setModal(null);
+        setTimeout(() => setNotice(""), 3500);
+        return;
+      }
+
       const response = await fetch("/api/transactions/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transactions: imported }),
+        body: JSON.stringify({ transactions: uniqueImports }),
       });
       if (!response.ok) throw new Error(await readApiError(response));
       const data = await response.json() as { transactions: Transaction[] };
       setTransactions(rows => [...data.transactions, ...rows]);
       setModal(null);
-      setNotice(`${data.transactions.length} transactions imported`);
-      setTimeout(() => setNotice(""), 3000);
+      setNotice(duplicateCount
+        ? `${data.transactions.length} imported, ${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped`
+        : `${data.transactions.length} transactions imported`);
+      setTimeout(() => setNotice(""), 3500);
     } catch (error) {
       setNotice(friendlyError(error, "Could not read that CSV file"));
     } finally {
@@ -439,9 +495,14 @@ export default function Home() {
         </>}
 
         {(active === "Dashboard" || active === "Transactions") && <section className="card transactions-card">
-          <div className="card-head"><div><h2>{active === "Dashboard" ? "Recent transactions" : "All transactions"}</h2><p>{visible.length} records{visibleSpent > 0 && <> • Spent <b>{money.format(visibleSpent)}</b></>}{visibleReceived > 0 && <> • Received <b>{money.format(visibleReceived)}</b></>}</p></div><div className="filters"><input aria-label="Search transactions" placeholder="Search merchant…" value={query} onChange={e => setQuery(e.target.value)} /><select aria-label="Filter by month" value={filterMonth} onChange={e => setFilterMonth(e.target.value)}><option value="All">All months</option>{monthNames.map((name, i) => <option key={name} value={String(i + 1).padStart(2, "0")}>{name}</option>)}</select><select aria-label="Filter by year" value={filterYear} onChange={e => setFilterYear(e.target.value)}><option value="All">All years</option>{availableYears.map(y => <option key={y} value={y}>{y}</option>)}</select><select aria-label="Filter by category" value={category} onChange={e => setCategory(e.target.value)}><option>All</option>{categories.map(c => <option key={c}>{c}</option>)}</select></div></div>
-          <div className="table-wrap"><table><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Amount</th><th aria-label="Actions"></th></tr></thead><tbody>{visible.slice(0, active === "Dashboard" ? 6 : 100).map(tx => <tr key={tx.id}><td>{new Date(`${tx.date}T12:00:00`).toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" })}</td><td><span className="merchant-icon">{tx.merchant.charAt(0)}</span><strong>{tx.merchant}</strong></td><td><span className="tag" style={{ "--cat": categoryMeta[tx.category]?.color } as React.CSSProperties}>{tx.category}</span></td><td className={tx.type}>{tx.type === "expense" ? "−" : "+"}{money.format(tx.amount)}</td><td><button className="row-action" aria-label={`Edit ${tx.merchant}`} onClick={() => startEdit(tx)}>Edit</button><button className="row-action danger" aria-label={`Delete ${tx.merchant}`} onClick={() => remove(tx.id)}>Delete</button></td></tr>)}</tbody></table></div>
+          <div className="card-head"><div><h2>{active === "Dashboard" ? "Recent transactions" : "All transactions"}</h2><p>{visible.length} records{visibleSpent > 0 && <> • Spent <b>{money.format(visibleSpent)}</b></>}{visibleReceived > 0 && <> • Received <b>{money.format(visibleReceived)}</b></>}</p></div><div className="filters"><input aria-label="Search transactions" placeholder="Search merchant…" value={query} onChange={e => { setQuery(e.target.value); setPage(1); }} /><select aria-label="Filter by month" value={filterMonth} onChange={e => { setFilterMonth(e.target.value); setPage(1); }}><option value="All">All months</option>{monthNames.map((name, i) => <option key={name} value={String(i + 1).padStart(2, "0")}>{name}</option>)}</select><select aria-label="Filter by year" value={filterYear} onChange={e => { setFilterYear(e.target.value); setPage(1); }}><option value="All">All years</option>{availableYears.map(y => <option key={y} value={y}>{y}</option>)}</select><select aria-label="Filter by category" value={category} onChange={e => { setCategory(e.target.value); setPage(1); }}><option>All</option>{categories.map(c => <option key={c}>{c}</option>)}</select></div></div>
+          <div className="table-wrap"><table><thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Amount</th><th aria-label="Actions"></th></tr></thead><tbody>{pageRows.map(tx => <tr key={tx.id}><td>{new Date(`${tx.date}T12:00:00`).toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" })}</td><td><span className="merchant-icon">{tx.merchant.charAt(0)}</span><strong>{tx.merchant}</strong></td><td><span className="tag" style={{ "--cat": categoryMeta[tx.category]?.color } as React.CSSProperties}>{tx.category}</span></td><td className={tx.type}>{tx.type === "expense" ? "−" : "+"}{money.format(tx.amount)}</td><td><button className="row-action" aria-label={`Edit ${tx.merchant}`} onClick={() => startEdit(tx)}>Edit</button><button className="row-action danger" aria-label={`Delete ${tx.merchant}`} onClick={() => remove(tx.id)}>Delete</button></td></tr>)}</tbody></table></div>
           {!visible.length && <div className="empty"><strong>No transactions found</strong><span>Try another search or add a new transaction.</span><button className="secondary" onClick={loadDemoData}>Load demo data</button></div>}
+          {active === "Transactions" && totalPages > 1 && <div className="pagination">
+            <button type="button" className="secondary" disabled={currentPage === 1} onClick={() => setPage(p => Math.max(1, p - 1))}>← Previous</button>
+            <span>Page {currentPage} of {totalPages}</span>
+            <button type="button" className="secondary" disabled={currentPage === totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>Next →</button>
+          </div>}
         </section>}
 
         {active === "Budgets" && <><div className="card-head budgets-head"><div><h2>Budgets</h2><p>Set a monthly limit per category, or add a new one</p></div><button type="button" className="primary" onClick={() => openBudgetModal("add")}>+ Add budget</button></div>

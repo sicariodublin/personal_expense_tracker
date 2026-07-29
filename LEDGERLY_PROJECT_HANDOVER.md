@@ -45,6 +45,9 @@ Implemented:
 - Month and year filtering on the Dashboard and Transactions views, applied across KPIs, chart, budgets and the transaction table.
 - A filtered-results totalizer (separate "Spent"/"Received" sums) next to the transaction search/category/month/year filters.
 - Search and category filters.
+- Transaction table pagination (50 rows/page on the Transactions view; resets to page 1 whenever a filter changes).
+- Merchant-based automatic categorisation on CSV import (regex rules against the merchant/description string), rather than everything defaulting to `Other`.
+- Duplicate-import detection: re-importing a CSV that overlaps with existing transactions skips rows that already exist (matched on date + merchant + amount + type, as a multiset so genuine repeat same-day purchases aren't dropped) and reports how many were skipped.
 - Basic API validation.
 - Production deployment through ChatGPT Sites.
 
@@ -56,9 +59,6 @@ Not implemented:
 - Multiple currencies.
 - Arbitrary date-range selection (only whole month/year granularity today).
 - CSV column-mapping interface.
-- Duplicate-import detection.
-- Automated transaction categorisation.
-- Export to CSV or PDF.
 - Comprehensive automated tests.
 
 ## 3. Technology stack
@@ -367,7 +367,11 @@ Import checks:
 - Validate category values.
 - Return `404` when an edited/deleted ID does not exist.
 - Add request-size limits.
-- Add duplicate-import protection.
+- ~~Add duplicate-import protection.~~ Partially resolved: the CSV import flow in
+  `app/page.tsx` (`importFile`) now filters out rows that already exist
+  (matched on date + merchant + amount + type) before calling this endpoint.
+  The API route itself still has no such check — a direct call to
+  `POST /api/transactions/import` can still insert duplicates.
 - Avoid exposing internal error messages in production.
 - Add ownership constraints if the site ever supports multiple users.
 
@@ -396,8 +400,14 @@ The parser:
 5. Detects likely columns by header text.
 6. Converts debit/credit or signed amount values into income/expense records.
 7. Converts recognised dates to ISO format.
-8. Defaults uncategorised expenses to `Other`.
-9. Sends valid transactions to the bulk-import API.
+8. Guesses a category per expense from the merchant/description text via
+   `deriveCategory` (a fixed list of regex rules — Netflix/Spotify →
+   Entertainment, Tesco/Lidl/Supervalu/Aldi/Spar → Groceries, and so on for
+   ~13 categories); anything that matches nothing falls back to `Other`.
+9. Drops rows that exactly match an existing transaction (date + merchant +
+   amount + type, compared as a multiset so genuine repeats aren't
+   incorrectly dropped) and reports how many were skipped as duplicates.
+10. Sends the remaining valid transactions to the bulk-import API.
 
 ### Import data flow
 
@@ -405,11 +415,13 @@ The parser:
 flowchart LR
     F["User selects CSV"] --> R["Browser reads file"]
     R --> H["Detect headers and delimiter"]
-    H --> P["Parse and normalise rows"]
-    P --> V{"Valid transactions?"}
+    H --> P["Parse, normalise and categorise rows"]
+    P --> DUP{"Already exists?"}
+    DUP -- Yes --> SKIP["Skip, count as duplicate"]
+    DUP -- No --> V{"Valid transactions?"}
     V -- No --> E["Display error"]
     V -- Yes --> B["POST bulk import"]
-    B --> D[("D1 database")]
+    B --> D[("data/transactions.json (default) or D1")]
     D --> U["Update dashboard"]
 ```
 
@@ -419,8 +431,12 @@ flowchart LR
 - Bank date formats vary.
 - Some European number formats may be parsed incorrectly.
 - There is no preview or column-mapping step.
-- All imported expenses initially use `Other`.
-- Importing the same file twice creates duplicates.
+- Category guessing is a fixed regex list tuned against the user's own real
+  bank statements (see `deriveCategory` in `app/page.tsx`); an unrecognised
+  merchant still lands in `Other`, and the rules can misfire on merchants
+  that weren't anticipated.
+- Duplicate detection happens client-side in `importFile` before the API
+  call; calling `POST /api/transactions/import` directly bypasses it.
 - The file itself is not permanently stored; only parsed transaction records
   are saved.
 
@@ -604,6 +620,7 @@ Accessibility improvements:
 ```bash
 npm install
 npm run dev
+npm run start
 ```
 
 Open the local address printed in the terminal.
@@ -724,7 +741,10 @@ Recommended test layers:
    fully editable from the UI (section 10), though they live in
    `localStorage` rather than the transactions store.
 4. The CSV parser is custom and limited.
-5. Duplicate imports are possible.
+5. ~~Duplicate imports are possible.~~ Resolved at the UI layer: re-importing
+   a CSV that overlaps with existing transactions skips already-present rows
+   (date + merchant + amount + type match) and reports how many were
+   skipped. The API endpoint itself has no such check (see section 8).
 6. Money uses floating-point database values.
 7. Update/delete routes need stronger validation and not-found responses.
 8. Most calculations occur client-side.
@@ -740,9 +760,11 @@ Recommended test layers:
     (`window.confirm` before delete) and for budget-category deletion
     (confirms, and warns with a usage count if transactions still reference
     the category).
-13. There is no transaction pagination (now more pressing: the transaction
-    table caps at the first 100 rows client-side, and the real imported
-    history has 2,606 rows).
+13. ~~There is no transaction pagination.~~ Resolved: the Transactions view
+    now paginates at 50 rows/page (client-side, over the already-fetched
+    `transactions` array — there's no server-side paging of the API
+    response itself). The Dashboard's "Recent transactions" preview is
+    intentionally unpaginated (always the latest 6).
 14. Multi-user ownership is not implemented.
 15. Automated test coverage is minimal.
 16. Budgets/custom categories are stored in `localStorage`, not alongside
@@ -757,7 +779,8 @@ Recommended test layers:
 - Add a real empty state.
 - Add Zod request validation.
 - Add error/loading states.
-- Add delete confirmation.
+- ~~Add delete confirmation.~~ Done, for both transactions and budget-category
+  deletion.
 - Add unit tests for calculations and CSV parsing.
 - Add API integration tests.
 
@@ -765,13 +788,13 @@ Recommended test layers:
 
 - ~~Add month/date-range filtering.~~ Done for month/year; arbitrary
   date-range selection is still open.
-- Add transaction pagination.
+- ~~Add transaction pagination.~~ Done, client-side (section 17, item 13).
 - ~~Add user-defined categories.~~ Done (section 10).
 - Move budgets/categories out of `localStorage` into the transactions store
   (local JSON or D1), so they're not lost on a storage reset.
 - Add recurring transaction support.
 - Add CSV preview and column mapping.
-- Detect duplicates before import.
+- ~~Detect duplicates before import.~~ Done at the UI layer (section 17, item 5).
 
 ### Phase 3 — Financial insights
 
